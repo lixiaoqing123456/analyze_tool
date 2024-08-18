@@ -1,0 +1,163 @@
+"-d dimension"
+"[-p #-of-thread]"
+"[-i index-type(t|g)]"
+"[-g graph-type(a|k|b|o|i)] "
+"[-t truncation-edge-limit]"
+"[-E edge-size]"
+"[-S edge-size-for-search]"
+"[-L edge-size-limit] "
+"[-e epsilon] "
+"[-o object-type(f|c)] "
+"[-D distance-function(1|2|a|A|h|j|c|C|E|p|l)]"
+"[-n #-of-inserted-objects] "  // added by Nyapicom
+"[-P path-adjustment-interval]"
+"[-B dynamic-edge-size-base]"
+"[-A object-alignment(t|f)] "
+"[-T build-time-limit] [-O outgoing x incoming] "
+"[-l #-of-neighbors-for-insertion-order[:epsilon-for-insertion-order]] "
+"index(output) [data.tsv(input)]";
+
+property.edgeSizeForCreation = args.getl("E", 10);
+property.edgeSizeForSearch = args.getl("S", 40);
+property.batchSizeForCreation = args.getl("b", 200);
+property.insertionRadiusCoefficient = args.getf("e", 0.1) + 1.0;
+property.truncationThreshold = args.getl("t", 0);
+property.dimension = args.getl("d", 0);
+property.threadPoolSize = args.getl("p", 24);
+property.pathAdjustmentInterval = args.getl("P", 0);
+property.dynamicEdgeSizeBase = args.getl("B", 30);
+property.buildTimeLimit = args.getf("T", 0.0);
+property.outgoingEdge = 10;
+property.incomingEdge = 100;
+默认为ANNG
+property.seedType = NGT::Property::SeedType::SeedTypeNone
+char objectType = args.getChar("o", 'f');
+char distanceType = args.getChar("D", '2');
+property.objectType = NGT::Index::Property::ObjectType::Float;
+property.distanceType = NGT::Index::Property::DistanceType::DistanceTypeL2;
+nOfNeighborsForInsertionOrder = 0;
+epsilonForInsertionOrder = 0.1;
+indexType = args.getChar("i", 't');
+
+类相关
+class ObjectSpace
+	主要的属性
+	dimension
+	distanceType
+	comparator
+	normalization
+	prefetchOffset
+	prefetchSize
+	方法大多都是需要实现的
+
+class BaseObject
+	主要是定义一些接口
+	需要子类实现的接口为[]
+	还有一个接口是set,主要功能是objectspace <- vector
+	
+class Object : public BaseObject
+	主要成员是uint8_t* vector; // 对齐的连续内存
+	在构造的时候 分配内存64字节对齐
+
+class ObjectRepository : public Repository<Object>
+	Object的指针数组
+	主要的属性有
+	dimension
+	size_t byteSize;	// the length of all of elements.
+    size_t paddedByteSize;
+    bool sparse;	// sparse data format
+    bool innerProduct;
+
+class ObjectSpaceRepository : public ObjectSpace, public ObjectRepository
+	主要是一些接口实现和比较类的实现
+	在构造的时候的操作
+	setLength(objectSize * d); // 单个元素 * 维度
+	setPaddedLength(objectSize * ObjectSpace::getPaddedDimension());
+	setDistanceType(t); // 主要是设置Objspace中的比较器
+
+class Index
+	主要是一些索引相关的接口
+	成员Index* index
+
+class Container
+	Object& object;
+	ObjectID id;
+
+class SearchContainer : public NGT::Container
+	size_t		size;
+    Distance		radius;
+    float		explorationCoefficient;
+    int			edgeSize;
+    size_t		distanceComputationCount;
+    ResultPriorityQueue	workingResult;
+    bool		useAllNodesInLeaf;
+    size_t		visitCount;
+    float		expectedAccuracy;
+    ObjectDistances* result;
+
+创建流程
+	1.根据属性创建对象
+		readOnly <- false
+		constructObjectSpace(prop)
+			objectSpace = new ObjectSpaceRepository<float, double>(dimension, typeid(float), prop.distanceType);
+		setProperty(prop)
+	2.调用静态接口NGT::Index::loadAndCreateIndex
+		2.1 GraphIndex::load数据
+			使用objectSpace->readText  --> ObjectRepository::readText
+				原理就是每一行使用 vector<double> object进行保存 --> 再转换到class Object --> 先分配内存, 再赋值, 可能还会归一化
+				有了每一个原始向量的对象之后 push_back 到ObjectRepo对象数组中
+		2.2 构建索引
+			InsertionOrder 现在都是默认值
+				nOfNeighboringNodes(50), epsilon(0.1), nOfThreads(0), indegreeOrder(false)
+			GraphIndex::createIndexWithInsertionOrder(insertionOrder, threadNumber, sizeOfRepository);
+				GraphIndex::insert(id)
+					0.searchForNNGInsertion(po, rs);
+						主要是根据obj数据搜索, 得到ObjectDistances rs
+						根据图的类型进行插入insertANNGNode, 以ANNG为例
+						输入第一个参数为向量, 第二个参数为一堆邻近节点<id, dist>,...
+						GraphIndex::search(sc); // 可能会搜索多变, 第一遍没有搜索到, 会调整参数搜索第二遍
+						GraphIndex::search(sc, seeds) // 根据seed去搜索
+							getSeedsFromGraph(repository, seeds);
+								其中一种方法是随机产生seedSize个<id, 0.0>
+								ObjectDistance obj(idx, 0.0);
+								
+							sc.setEpsilon(getEpsilonFromExpectedAccuracy(sc.expectedAccuracy));
+								if (sc.expectedAccuracy > 0.0) // 默认是-1
+								在搜索之前可以根据acc获取一个e
+							
+							NeighborhoodGraph::search(sc, seeds);
+								UncheckedSet unchecked; // 优先队列 ObjectDistance
+								DistanceCheckedSet distanceChecked; // set
+								ResultSet results; // 优先队列 ObjectDistance
+								setupDistances
+									预取seed的边
+									计算seed和要插入边的距离
+									
+								setupSeeds
+									seeds排序, 可能主要是按照id排序
+									seeds里面的distance是什么时候生成的
+									主要就是处理seeds里面的node -> results, 设置一些
+								
+								按照论文的算法进行搜索
+
+					1.根据search到的结果生成一个新的GraphNode
+						newNode插入GraphNode
+						调整prevsize, 现在暂时不知道这个有什么用
+						
+					2.调整之前插入的GraphNode的邻接边
+						addEdge(ObjectID target,
+								ObjectID addID,
+								Distance addDistance,
+								bool identityCheck = true)
+								将newId和distance插入到search到的neighbor的GraphNode里面
+					3.调整完oldGraphNode的边之后有一个truncat逻辑
+						1.先删除当前node的最后几个要truncat的
+						2.邻居节点相应的边也删除
+						3.删除之后后台有任务会重新去搜索之前节点的最近邻节点
+								
+				如果pathAdjustCount > 0则会调整边
+
+GraphRepository的insert接口
+	入参id, [<id1, dis1>, <id2, dis2>, ...]
+	1.申请GRAPH_NODE
+	2.graph_node <- objects
